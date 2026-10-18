@@ -9,7 +9,7 @@ function trimSlashes(value: string): string {
 }
 
 function escapeRegex(value: string): string {
-  return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+  return value.replace(/[|\\{}()[\]^$+?.*]/g, "\\$&");
 }
 
 export function normalizeRelativePath(input: string, workspaceRoot?: string): string {

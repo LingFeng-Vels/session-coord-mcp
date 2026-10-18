@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { initializeRepository, inspectRepositorySetup } from "./bootstrap/init.js";
 import { createConfig } from "./config.js";
 import { createSessionCoordServer } from "./server.js";
+import { VERSION } from "./version.js";
 
 interface ParsedArgs {
   command: "serve" | "init" | "doctor";
@@ -22,7 +23,7 @@ interface ParsedArgs {
 }
 
 function printHelp(): void {
-  console.log(`session-coord-mcp 0.1.0
+  console.log(`session-coord-mcp ${VERSION}
 
 Usage:
   session-coord-mcp [serve] [options]
@@ -110,7 +111,7 @@ async function main() {
   }
 
   if (parsed.version) {
-    console.log("0.1.0");
+    console.log(VERSION);
     return;
   }
 

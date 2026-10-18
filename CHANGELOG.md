@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1
+
+- Heartbeat extends that session's unexpired path claims
+- Completing a task writes a completion update
+- Conflict checks include related tasks and recent decisions in the same scope
+- Multi-path claims are inserted in one transaction
+- Git scope checks throw on command failure and parse renamed or quoted porcelain paths
+- Server version is read from `package.json`
+
 ## 0.1.0
 
 - Initial open-source release
