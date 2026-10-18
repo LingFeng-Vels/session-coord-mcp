@@ -34,18 +34,39 @@ function runGit(args: string[], cwd: string): string {
   }
 }
 
+function appendUtf8(bytes: number[], codePoint: number): void {
+  if (codePoint <= 0x7f) {
+    bytes.push(codePoint);
+    return;
+  }
+
+  bytes.push(...Buffer.from(String.fromCodePoint(codePoint), "utf8"));
+}
+
 function decodeGitQuoted(body: string): string {
   const bytes: number[] = [];
+  const simpleEscapes: Record<string, number> = {
+    a: 0x07,
+    b: 0x08,
+    t: 0x09,
+    n: 0x0a,
+    v: 0x0b,
+    f: 0x0c,
+    r: 0x0d,
+    "\\": 0x5c,
+    '"': 0x22,
+  };
 
-  for (let index = 0; index < body.length; index += 1) {
-    const current = body[index];
-    if (current !== "\\") {
-      const code = current.charCodeAt(0);
-      if (code > 0x7f) {
-        bytes.push(...Buffer.from(current, "utf8"));
-      } else {
-        bytes.push(code);
+  for (let index = 0; index < body.length; ) {
+    if (body[index] !== "\\") {
+      const codePoint = body.codePointAt(index);
+      if (codePoint === undefined) {
+        break;
       }
+      // Quoted porcelain can contain raw non-BMP characters when
+      // core.quotePath=false. A surrogate half is not valid UTF-8.
+      appendUtf8(bytes, codePoint);
+      index += codePoint > 0xffff ? 2 : 1;
       continue;
     }
 
@@ -55,54 +76,37 @@ function decodeGitQuoted(body: string): string {
       break;
     }
 
-    switch (escaped) {
-      case "a":
-        bytes.push(0x07);
-        break;
-      case "b":
-        bytes.push(0x08);
-        break;
-      case "t":
-        bytes.push(0x09);
-        break;
-      case "n":
-        bytes.push(0x0a);
-        break;
-      case "v":
-        bytes.push(0x0b);
-        break;
-      case "f":
-        bytes.push(0x0c);
-        break;
-      case "r":
-        bytes.push(0x0d);
-        break;
-      case "\\":
-        bytes.push(0x5c);
-        break;
-      case '"':
-        bytes.push(0x22);
-        break;
-      default:
-        if (escaped >= "0" && escaped <= "7") {
-          let octal = escaped;
-          for (
-            let extra = 0;
-            extra < 2 &&
-            body[index + 1] !== undefined &&
-            body[index + 1] >= "0" &&
-            body[index + 1] <= "7";
-            extra += 1
-          ) {
-            index += 1;
-            octal += body[index];
-          }
-          bytes.push(Number.parseInt(octal, 8));
-          break;
-        }
-        bytes.push(escaped.charCodeAt(0));
-        break;
+    const simple = simpleEscapes[escaped];
+    if (simple !== undefined) {
+      bytes.push(simple);
+      index += 1;
+      continue;
     }
+
+    if (escaped >= "0" && escaped <= "7") {
+      let octal = escaped;
+      let consumed = 1;
+      while (
+        consumed < 3 &&
+        body[index + 1] !== undefined &&
+        body[index + 1] >= "0" &&
+        body[index + 1] <= "7"
+      ) {
+        index += 1;
+        consumed += 1;
+        octal += body[index];
+      }
+      bytes.push(Number.parseInt(octal, 8));
+      index += 1;
+      continue;
+    }
+
+    const codePoint = escaped.codePointAt(0);
+    if (codePoint === undefined) {
+      break;
+    }
+    appendUtf8(bytes, codePoint);
+    index += codePoint > 0xffff ? 2 : 1;
   }
 
   return Buffer.from(bytes).toString("utf8");

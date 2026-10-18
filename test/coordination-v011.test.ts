@@ -124,6 +124,41 @@ test("validate_scope reports unclaimed files and keeps claimed files in scope", 
   assert.deepEqual(report.out_of_scope_paths, ["docs/notes.md"]);
 });
 
+test("validate_scope keeps claimed emoji and CJK files in scope", () => {
+  const emojiName = "😀 file.ts";
+  const cjkName = "测试 文件.ts";
+  const repo = createGitRepo();
+  runGit(repo, ["config", "core.quotePath", "false"]);
+  fs.writeFileSync(path.join(repo, emojiName), "emoji\n");
+  fs.writeFileSync(path.join(repo, cjkName), "cjk\n");
+  fs.writeFileSync(path.join(repo, "notes.md"), "plain\n");
+  runGit(repo, ["add", "."]);
+  runGit(repo, ["commit", "-m", "add unicode names"]);
+  fs.appendFileSync(path.join(repo, emojiName), "more\n");
+  fs.appendFileSync(path.join(repo, cjkName), "more\n");
+  fs.appendFileSync(path.join(repo, "notes.md"), "more\n");
+
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-coord-state-"));
+  const { service } = createService(repo, 30, stateRoot);
+  const registered = service.registerSession({
+    agent_name: "worker",
+    host_type: "codex",
+    worktree_path: repo,
+  });
+  service.claimPaths({
+    session_id: registered.session_id,
+    paths: [emojiName, cjkName],
+    claim_mode: "exclusive",
+    reason: "edit unicode files",
+  });
+
+  const report = service.validateScope({ session_id: registered.session_id });
+  assert.ok(report.changed_paths.includes(emojiName));
+  assert.ok(report.changed_paths.includes(cjkName));
+  assert.equal(report.changed_paths.some((item) => item.includes("\uFFFD")), false);
+  assert.deepEqual(report.out_of_scope_paths, ["notes.md"]);
+});
+
 test("validate_scope throws when git fails instead of reporting an empty scope", () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-coord-nogit-"));
   const { service } = createService(workspaceRoot);

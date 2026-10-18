@@ -40,6 +40,19 @@ test("porcelain parser keeps rename destinations and unquotes paths", () => {
   assert.deepEqual(parsePorcelainPaths("M  src/plain.ts"), ["src/plain.ts"]);
 });
 
+test("porcelain parser decodes raw and octal-escaped emoji paths as UTF-8", () => {
+  assert.deepEqual(parsePorcelainPaths('?? "😀 file.ts"'), ["😀 file.ts"]);
+  assert.deepEqual(parsePorcelainPaths('?? "\\360\\237\\230\\200 file.ts"'), ["😀 file.ts"]);
+  assert.deepEqual(parsePorcelainPaths('R  "😀 old.ts" -> "测试 new.ts"'), [
+    "😀 old.ts",
+    "测试 new.ts",
+  ]);
+  assert.equal(
+    parsePorcelainPaths('?? "😀 file.ts"').some((item) => item.includes("\uFFFD")),
+    false,
+  );
+});
+
 test("listChangedFiles returns an empty list for a clean repository", () => {
   const repo = createGitRepo();
   fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
@@ -90,4 +103,30 @@ test("listChangedFiles parses quoted paths and renames from a temp git repo", ()
     changed.some((item) => item.includes('"') || item.includes("->")),
     false,
   );
+});
+
+test("listChangedFiles keeps emoji and CJK filenames from a temp git repo", () => {
+  const emojiName = "😀 file.ts";
+  const cjkName = "测试 文件.ts";
+
+  for (const quotePath of ["true", "false"]) {
+    const repo = createGitRepo();
+    runGit(repo, ["config", "core.quotePath", quotePath]);
+    fs.writeFileSync(path.join(repo, emojiName), "emoji\n");
+    fs.writeFileSync(path.join(repo, cjkName), "cjk\n");
+
+    const changed = new GitService().listChangedFiles(repo);
+    assert.ok(
+      changed.includes(emojiName),
+      `quotePath=${quotePath} expected ${emojiName}, got ${changed.join(", ")}`,
+    );
+    assert.ok(
+      changed.includes(cjkName),
+      `quotePath=${quotePath} expected ${cjkName}, got ${changed.join(", ")}`,
+    );
+    assert.equal(
+      changed.some((item) => item.includes("\uFFFD") || item.includes('"')),
+      false,
+    );
+  }
 });
