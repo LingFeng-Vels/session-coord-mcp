@@ -453,27 +453,47 @@ export class CoordinationService {
     this.getSession(input.session_id);
 
     const timestamp = nowIso();
-    this.db
-      .prepare(
-        `
-          UPDATE sessions
-          SET last_heartbeat_at = ?,
-              status = COALESCE(?, status),
-              current_task_id = COALESCE(?, current_task_id)
-          WHERE workspace_id = ? AND id = ?
-        `,
-      )
-      .run(
-        timestamp,
-        input.status ?? null,
-        input.current_task_id ?? null,
-        this.workspaceId,
-        input.session_id,
-      );
+    const extendedExpiry = addMinutes(timestamp, this.config.defaultTtlMinutes);
+    const applyHeartbeat = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `
+            UPDATE sessions
+            SET last_heartbeat_at = ?,
+                status = COALESCE(?, status),
+                current_task_id = COALESCE(?, current_task_id)
+            WHERE workspace_id = ? AND id = ?
+          `,
+        )
+        .run(
+          timestamp,
+          input.status ?? null,
+          input.current_task_id ?? null,
+          this.workspaceId,
+          input.session_id,
+        );
+
+      const extended = this.db
+        .prepare(
+          `
+            UPDATE path_claims
+            SET expires_at = ?
+            WHERE workspace_id = ?
+              AND session_id = ?
+              AND expires_at > ?
+              AND expires_at < ?
+          `,
+        )
+        .run(extendedExpiry, this.workspaceId, input.session_id, timestamp, extendedExpiry);
+
+      return extended.changes;
+    });
+    const claimsExtended = applyHeartbeat();
 
     return {
       ok: true,
       heartbeat_at: timestamp,
+      claims_extended: claimsExtended,
       workspace_summary: this.getWorkspaceSummary(),
     };
   }
@@ -848,28 +868,63 @@ export class CoordinationService {
   }) {
     this.reapStaleRecords();
     this.getSession(input.session_id);
-    this.getTask(input.task_id);
+    const task = this.getTask(input.task_id);
+    const timestamp = nowIso();
+    const releaseClaims = input.release_claims ?? true;
 
-    this.db
-      .prepare(
-        `
-          UPDATE tasks
-          SET status = 'done', updated_at = ?
-          WHERE workspace_id = ? AND id = ?
-        `,
-      )
-      .run(nowIso(), this.workspaceId, input.task_id);
-
-    if (input.release_claims ?? true) {
+    const complete = this.db.transaction(() => {
       this.db
         .prepare(
           `
-            DELETE FROM path_claims
-            WHERE workspace_id = ? AND session_id = ? AND task_id = ?
+            UPDATE tasks
+            SET status = 'done', updated_at = ?
+            WHERE workspace_id = ? AND id = ?
           `,
         )
-        .run(this.workspaceId, input.session_id, input.task_id);
-    }
+        .run(timestamp, this.workspaceId, input.task_id);
+
+      if (releaseClaims) {
+        this.db
+          .prepare(
+            `
+              DELETE FROM path_claims
+              WHERE workspace_id = ? AND session_id = ? AND task_id = ?
+            `,
+          )
+          .run(this.workspaceId, input.session_id, input.task_id);
+      }
+
+      this.db
+        .prepare(
+          `
+            INSERT INTO updates (
+              id,
+              workspace_id,
+              session_id,
+              task_id,
+              kind,
+              message,
+              details_json,
+              created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+        )
+        .run(
+          crypto.randomUUID(),
+          this.workspaceId,
+          input.session_id,
+          input.task_id,
+          "progress",
+          `Completed task: ${task.title}`,
+          stringifyJson({
+            event: "task_completed",
+            release_claims: releaseClaims,
+          }),
+          timestamp,
+        );
+    });
+    complete();
 
     return {
       task: this.serializeTask(this.getTask(input.task_id)),
@@ -935,20 +990,22 @@ export class CoordinationService {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
     );
-
-    for (const pathPattern of normalizedPaths) {
-      insert.run(
-        crypto.randomUUID(),
-        this.workspaceId,
-        input.task_id ?? null,
-        input.session_id,
-        pathPattern,
-        input.claim_mode,
-        input.reason ?? null,
-        expiresAt,
-        timestamp,
-      );
-    }
+    const insertClaims = this.db.transaction((pathPatterns: string[]) => {
+      for (const pathPattern of pathPatterns) {
+        insert.run(
+          crypto.randomUUID(),
+          this.workspaceId,
+          input.task_id ?? null,
+          input.session_id,
+          pathPattern,
+          input.claim_mode,
+          input.reason ?? null,
+          expiresAt,
+          timestamp,
+        );
+      }
+    });
+    insertClaims(normalizedPaths);
 
     return {
       ok: true,
@@ -999,15 +1056,68 @@ export class CoordinationService {
 
     const normalizedPaths = normalizePaths(input.paths, this.config.workspaceRoot);
     const claims = this.listActiveClaims();
+    const tasks = this.db
+      .prepare(
+        `
+          SELECT *
+          FROM tasks
+          WHERE workspace_id = ?
+          ORDER BY updated_at DESC
+        `,
+      )
+      .all(this.workspaceId) as TaskRow[];
+    const decisions = this.db
+      .prepare(
+        `
+          SELECT *
+          FROM decisions
+          WHERE workspace_id = ?
+          ORDER BY created_at DESC
+        `,
+      )
+      .all(this.workspaceId) as DecisionRow[];
+    const sessions = this.db
+      .prepare("SELECT * FROM sessions WHERE workspace_id = ?")
+      .all(this.workspaceId) as SessionRow[];
 
     return {
-      conflicts: normalizedPaths.map((requestedPath) => ({
-        requested_path: requestedPath,
-        matches: claims
+      conflicts: normalizedPaths.map((requestedPath) => {
+        const matches = claims
           .filter((claim) => (input.session_id ? claim.session_id !== input.session_id : true))
           .filter((claim) => patternsOverlap(claim.path_pattern, requestedPath))
-          .map((claim) => this.serializeClaim(claim)),
-      })),
+          .map((claim) => this.serializeClaim(claim));
+        const ownerIds = [...new Set(matches.map((match) => match.session_id))];
+        const relatedTaskIds = new Set(
+          matches.map((match) => match.task_id).filter((taskId): taskId is string => Boolean(taskId)),
+        );
+
+        const relatedTasks = tasks.filter((task) => {
+          if (relatedTaskIds.has(task.id)) {
+            return true;
+          }
+
+          const plannedPaths = parseJson<string[]>(task.planned_paths_json, []);
+          return plannedPaths.some((plannedPath) => patternsOverlap(plannedPath, requestedPath));
+        });
+        const recentDecisions = decisions
+          .filter((decision) => patternsOverlap(decision.scope_key, requestedPath))
+          .slice(0, this.config.updatesLimit);
+
+        return {
+          requested_path: requestedPath,
+          matches,
+          owners: ownerIds.map((sessionId) => {
+            const owner = sessions.find((session) => session.id === sessionId);
+            return {
+              session_id: sessionId,
+              agent_name: owner?.agent_name ?? null,
+              status: owner?.status ?? null,
+            };
+          }),
+          related_tasks: relatedTasks.map((task) => this.serializeTask(task)),
+          recent_decisions: recentDecisions.map((decision) => this.serializeDecision(decision)),
+        };
+      }),
     };
   }
 
@@ -1235,9 +1345,13 @@ export class CoordinationService {
   validateScope(input: { session_id: string; git_diff_base?: string | null }) {
     this.reapStaleRecords();
     const session = this.getSession(input.session_id);
-    const changedPaths = this.gitService
-      .listChangedFiles(session.worktree_path, input.git_diff_base)
-      .map((item) => normalizeRelativePath(item, session.worktree_path));
+    const changedPaths = [
+      ...new Set(
+        this.gitService
+          .listChangedFiles(session.worktree_path, input.git_diff_base)
+          .map((item) => normalizeRelativePath(item, session.worktree_path)),
+      ),
+    ];
     const claims = this.listActiveClaims().filter((claim) => claim.session_id === input.session_id);
 
     const matched = changedPaths.map((changedPath) => ({

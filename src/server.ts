@@ -6,6 +6,7 @@ import { createDatabase } from "./db/database.js";
 import { GitService } from "./git/git-service.js";
 import { toTextResult } from "./mcp/result.js";
 import type { ServerConfig } from "./types.js";
+import { VERSION } from "./version.js";
 
 export function createSessionCoordServer(config: ServerConfig) {
   const db = createDatabase(config.dbPath);
@@ -13,7 +14,7 @@ export function createSessionCoordServer(config: ServerConfig) {
 
   const server = new McpServer({
     name: "session-coord-mcp",
-    version: "0.1.0",
+    version: VERSION,
   });
 
   server.registerTool(
@@ -38,7 +39,8 @@ export function createSessionCoordServer(config: ServerConfig) {
     "coord_heartbeat",
     {
       title: "Heartbeat",
-      description: "Refresh a session heartbeat and optionally update status/current task.",
+      description:
+        "Refresh a session heartbeat, optionally update status or current task, and extend this session's unexpired path claims.",
       inputSchema: {
         session_id: z.string(),
         status: z.enum(["active", "idle", "blocked", "offline"]).optional(),
@@ -185,7 +187,8 @@ export function createSessionCoordServer(config: ServerConfig) {
     "coord_complete_task",
     {
       title: "Complete Task",
-      description: "Mark a task as done and optionally release path claims.",
+      description:
+        "Mark a task as done, optionally release its path claims, and write a completion update.",
       inputSchema: {
         task_id: z.string(),
         session_id: z.string(),
@@ -231,7 +234,8 @@ export function createSessionCoordServer(config: ServerConfig) {
     "coord_check_conflicts",
     {
       title: "Check Conflicts",
-      description: "Inspect conflicts for candidate paths against active claims.",
+      description:
+        "Inspect candidate paths against active claims, related tasks, and recent decisions in the same scope.",
       inputSchema: {
         paths: z.array(z.string()).min(1),
         session_id: z.string().optional(),

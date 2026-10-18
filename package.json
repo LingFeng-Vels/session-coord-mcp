@@ -1,6 +1,6 @@
 {
   "name": "session-coord-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A local-first MCP server for coordinating parallel coding sessions across Claude Code, Codex, and other MCP clients.",
   "type": "module",
   "author": "\u51cc\u98ce",
